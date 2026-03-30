@@ -162,3 +162,9 @@ docker exec client-udhcpc cat /etc/resolv.conf
 - RFC 2132 §9.3: DHCP Options — Option 52 (Option Overload)
 - CVE-2024-3661: TunnelVision — DHCP Option 121 routing injection (same attack class)
 - Snort 3 Documentation: https://docs.snort.org/
+
+## 8. Related Reports
+
+- **This repository**: https://github.com/APEvul-cyber/DHCP_snort_vul
+- Verified client-side impact (BusyBox udhcpc): https://github.com/APEvul-cyber/DHCP_busybox_vul
+- Same detection gap — Suricata: https://github.com/APEvul-cyber/DHCP_suricata_vul
