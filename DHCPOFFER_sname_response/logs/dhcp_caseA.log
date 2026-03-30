@@ -1,0 +1,17 @@
+udhcpc: started, v1.36.1
+[udhcpc-script] Deconfiguring eth0
+udhcpc: broadcasting discover
+udhcpc: broadcasting select for 10.100.0.50, server 10.100.0.2
+udhcpc: lease of 10.100.0.50 obtained from 10.100.0.2, lease time 300
+[udhcpc-script] === DHCP lease bound on eth0 ===
+[udhcpc-script]   IP:      10.100.0.50/24
+[udhcpc-script]   Router:  10.100.0.1
+[udhcpc-script]   DNS:     10.100.0.1
+[udhcpc-script]   Domain:  legit.local
+[udhcpc-script]   Search:  
+[udhcpc-script]   NTP:     
+[udhcpc-script]   Boot:    file= siaddr=10.100.0.2 sname=evil-pxe.attacker.local
+[udhcpc-script]   Opt43:   
+[udhcpc-script]   Opt119:  
+[udhcpc-script]   Opt60:   
+[udhcpc-script]   Lease:   300 seconds
